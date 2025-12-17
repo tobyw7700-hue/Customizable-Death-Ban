@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": [
+    "DRD",
+    "NTN",
+    "DRD"
+  ],
+  "key": {
+    "D": "minecraft:diamond_block",
+    "R": "minecraft:redstone_block",
+    "N": "minecraft:netherite_ingot",
+    "T": "minecraft:totem_of_undying"
+  },
+  "result": {
+    "id": "hardcoreban:revive_totem",
+    "count": 1
+  }
+}
