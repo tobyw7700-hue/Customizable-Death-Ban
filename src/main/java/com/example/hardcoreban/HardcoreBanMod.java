@@ -29,6 +29,7 @@ import net.minecraft.screen.ScreenHandlerType;
 import net.minecraft.screen.SimpleNamedScreenHandlerFactory;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.PlayerManager;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -123,6 +124,10 @@ public class HardcoreBanMod implements ModInitializer {
 
     @Override
     public void onInitialize() {
+        // PROOF you’re running the jar you built:
+        System.out.println("[HardcoreBan] LOADED_JAR=" +
+                HardcoreBanMod.class.getProtectionDomain().getCodeSource().getLocation());
+
         // -------------------------
         // Setup config paths
         // -------------------------
@@ -137,7 +142,7 @@ public class HardcoreBanMod implements ModInitializer {
         loadPendingTotemPop();     // loads pending pop set
 
         // -------------------------
-        // Register revive item (NO reflection, no randomness)
+        // Register revive item
         // -------------------------
         REVIVE_ITEM = registerItemWithKey(REVIVE_ID, new Item.Settings().maxCount(1));
 
@@ -147,17 +152,9 @@ public class HardcoreBanMod implements ModInitializer {
         UseItemCallback.EVENT.register((player, world, hand) -> {
             ItemStack stack = player.getStackInHand(hand);
 
-            if (stack.isEmpty() || !stack.isOf(REVIVE_ITEM)) {
-                return ActionResult.PASS;
-            }
-
-            if (world.isClient()) {
-                return ActionResult.PASS;
-            }
-
-            if (!(player instanceof ServerPlayerEntity sp)) {
-                return ActionResult.PASS;
-            }
+            if (stack.isEmpty() || !stack.isOf(REVIVE_ITEM)) return ActionResult.PASS;
+            if (world.isClient()) return ActionResult.PASS;
+            if (!(player instanceof ServerPlayerEntity sp)) return ActionResult.PASS;
 
             // prune first, so GUI never shows expired bans
             pruneExpiredAndOnline(serverOrNull(), "rightclick");
@@ -183,16 +180,11 @@ public class HardcoreBanMod implements ModInitializer {
 
             String name = sp.getName().getString();
 
-            // If they're online, they aren't banned anymore; remove stale entry.
             boolean removed = false;
             if (BANNED_UNTIL.remove(name) != null) {
                 removed = true;
                 saveBannedStore();
                 log("Join cleanup removed stale banned entry for online player=" + name);
-            }
-
-            if (removed) {
-                // no-op, but keeps it obvious in logs
             }
 
             if (PENDING_TOTEM_POP.remove(name)) {
@@ -207,7 +199,13 @@ public class HardcoreBanMod implements ModInitializer {
         // -------------------------
         ServerLifecycleEvents.SERVER_STARTING.register(server -> {
             SERVER = server;
-            pruneExpiredAndOnline(server, "server_start");
+            // IMPORTANT: DO NOT prune here. PlayerManager may still be null at this stage.
+        });
+
+        ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+            // Safe time to touch PlayerManager
+            lastPruneMs = 0L;
+            pruneExpiredAndOnline(server, "server_started");
         });
 
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> SERVER = null);
@@ -218,7 +216,6 @@ public class HardcoreBanMod implements ModInitializer {
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             runBanQueue(server);
 
-            // prune occasionally (every ~30s)
             long now = System.currentTimeMillis();
             if (now - lastPruneMs > 30_000L) {
                 lastPruneMs = now;
@@ -236,16 +233,12 @@ public class HardcoreBanMod implements ModInitializer {
     }
 
     // =========================================================
-    // Item registration helper (correct 1.21.x approach)
+    // Item registration helper (modern)
     // =========================================================
 
     private static Item registerItemWithKey(Identifier id, Item.Settings settings) {
         RegistryKey<Item> key = RegistryKey.of(RegistryKeys.ITEM, id);
-
-        // This is the correct modern way (no reflection, no randomness).
         Item item = new Item(settings.registryKey(key));
-
-        // Registry.register overload accepts RegistryKey in modern versions.
         Registry.register(Registries.ITEM, key, item);
         return item;
     }
@@ -258,7 +251,6 @@ public class HardcoreBanMod implements ModInitializer {
         dispatcher.register(
                 literal("hb")
                         .requires(HardcoreBanMod::isOpOrConsole)
-                        // /hb (no args) -> show help + current
                         .executes(ctx -> {
                             ctx.getSource().sendFeedback(() -> Text.literal(
                                     "§6[HardcoreBan] §7Current ban duration: §e" + banDuration
@@ -290,7 +282,6 @@ public class HardcoreBanMod implements ModInitializer {
     }
 
     private static void registerReviveCommands(CommandDispatcher<ServerCommandSource> dispatcher) {
-        // OP ONLY (item is for everyone)
         dispatcher.register(
                 literal("revive")
                         .requires(HardcoreBanMod::isOpOrConsole)
@@ -330,7 +321,6 @@ public class HardcoreBanMod implements ModInitializer {
                                 .then(argument("name", word()).executes(ctx -> {
                                     String n = getString(ctx, "name");
                                     if (n != null && !n.isBlank()) {
-                                        // for testing: default 24h
                                         long until = System.currentTimeMillis() + (24L * 60L * 60L * 1000L);
                                         BANNED_UNTIL.put(n, until);
                                         saveBannedStore();
@@ -368,22 +358,16 @@ public class HardcoreBanMod implements ModInitializer {
 
     private static void sendHelp(ServerCommandSource src) {
         src.sendFeedback(() -> Text.literal("§6[HardcoreBan] Commands:"), false);
-
         src.sendFeedback(() -> Text.literal("§e/hb §7- Shows current ban duration + usage."), false);
         src.sendFeedback(() -> Text.literal("§e/hb <duration>§7 - Sets tempban duration used on death."), false);
         src.sendFeedback(() -> Text.literal("§7   Example: §f/hb 2d §7or §f/hb 12h30m"), false);
-
         src.sendFeedback(() -> Text.literal("§e/revive§7 - Opens the revive GUI (OP only)."), false);
         src.sendFeedback(() -> Text.literal("§e/revivegui§7 - Same as /revive (OP only)."), false);
-
         src.sendFeedback(() -> Text.literal("§e/hardcoreban addbanned <name>§7 - Adds a name to the revive GUI list (testing)."), false);
         src.sendFeedback(() -> Text.literal("§e/hardcoreban removebanned <name>§7 - Removes a name from the revive GUI list."), false);
-
         src.sendFeedback(() -> Text.literal("§e/hardcoreban debug on|off§7 - Turns HardcoreBan debug logs on/off."), false);
-
         src.sendFeedback(() -> Text.literal("§6[HardcoreBan] Item usage:"), false);
         src.sendFeedback(() -> Text.literal("§eRight-click the Revive Totem§7 - Opens revive GUI for anyone (only if someone is banned)."), false);
-
         src.sendFeedback(() -> Text.literal("§6[HardcoreBan] Notes:"), false);
         src.sendFeedback(() -> Text.literal("§7- Expired bans are auto-removed from the revive list."), false);
         src.sendFeedback(() -> Text.literal("§7- If a player is online, they are removed from the revive list."), false);
@@ -441,7 +425,6 @@ public class HardcoreBanMod implements ModInitializer {
     public static void queueTempBan(String playerName, String reason) {
         if (playerName == null || playerName.isBlank()) return;
 
-        // store expiry locally so GUI can show timers + auto-clean
         long now = System.currentTimeMillis();
         long add = parseDurationToMillis(banDuration);
         long until = (add <= 0) ? (now + 24L * 60L * 60L * 1000L) : (now + add);
@@ -449,14 +432,10 @@ public class HardcoreBanMod implements ModInitializer {
         BANNED_UNTIL.put(playerName, until);
         saveBannedStore();
 
-        // queue BanHammer command
         BAN_QUEUE.add(new QueuedBan(playerName, banDuration, reason == null ? "" : reason));
     }
 
-    // Keep this so your mixin compiles (even if you stop using it)
     public static String formatReason(String deathMessage, int x, int y, int z) {
-        // You asked: do NOT show the detailed reason, just “{playername} has died”
-        // So we keep a harmless format, but you can ignore it in the mixin.
         String time = LocalDateTime.now().format(TIME_FORMAT);
         return (deathMessage == null ? "Player has died" : deathMessage) + " | " + time;
     }
@@ -472,7 +451,6 @@ public class HardcoreBanMod implements ModInitializer {
     private static void openReviveMenu(ServerPlayerEntity opener) {
         MinecraftServer server = serverOrNull();
 
-        // prune before showing
         pruneExpiredAndOnline(server, "open_gui");
 
         List<String> names = new ArrayList<>(BANNED_UNTIL.keySet());
@@ -503,12 +481,10 @@ public class HardcoreBanMod implements ModInitializer {
         ItemStack viaCodec = tryBuildHeadViaCodec(name);
         ItemStack head = (viaCodec != null && !viaCodec.isEmpty()) ? viaCodec : new ItemStack(Items.PLAYER_HEAD);
 
-        // timer text in name (simple + robust; avoids lore component mapping changes)
         String remaining = formatRemaining(untilMs);
         String title = remaining.isEmpty() ? name : (name + " §7(" + remaining + ")");
         head.set(DataComponentTypes.CUSTOM_NAME, Text.literal(title));
 
-        // fallback steve-head fix: set SkullOwner too (harmless even if codec worked)
         NbtCompound skullOwner = new NbtCompound();
         skullOwner.putString("Name", name);
         NbtCompound root = new NbtCompound();
@@ -575,11 +551,9 @@ public class HardcoreBanMod implements ModInitializer {
         if (server == null) return;
         if (targetName == null || targetName.isBlank()) return;
 
-        // If ban already expired, don't allow "revive"
         Long until = BANNED_UNTIL.get(targetName);
         long now = System.currentTimeMillis();
         if (until == null || until <= now) {
-            // clean it out
             BANNED_UNTIL.remove(targetName);
             saveBannedStore();
 
@@ -588,24 +562,18 @@ public class HardcoreBanMod implements ModInitializer {
             return;
         }
 
-        // Totem pop for the reviver immediately
         triggerTotemPop(reviver);
 
-        // Unban
         runCommand(server, "unban " + targetName);
 
-        // Remove from banned store
         BANNED_UNTIL.remove(targetName);
         saveBannedStore();
 
-        // Mark revived player to receive totem pop on first join back
         PENDING_TOTEM_POP.add(targetName);
         savePendingTotemPop();
 
-        // Broadcast
         server.getPlayerManager().broadcast(Text.literal(targetName + " has been revived"), false);
 
-        // Consume item on successful revive
         consumeOneReviveTotem(reviver);
     }
 
@@ -629,8 +597,6 @@ public class HardcoreBanMod implements ModInitializer {
     private static void runBanQueue(MinecraftServer server) {
         QueuedBan ban;
         while ((ban = BAN_QUEUE.poll()) != null) {
-            // reason: you asked to keep it simple
-            // (your mixin should pass "<name> has died")
             String command = "tempban " + ban.playerName + " " + ban.duration + " " + quote(ban.reason);
             runCommand(server, command);
         }
@@ -658,10 +624,8 @@ public class HardcoreBanMod implements ModInitializer {
 
     private static void triggerTotemPop(ServerPlayerEntity player) {
         if (player == null) return;
-
         if (!(player.getEntityWorld() instanceof ServerWorld sw)) return;
 
-        // Vanilla "totem used" status
         sw.sendEntityStatus(player, (byte) 35);
 
         sw.spawnParticles(
@@ -683,15 +647,14 @@ public class HardcoreBanMod implements ModInitializer {
     }
 
     // =========================================================
-    // Pruning: remove expired + remove online players
+    // Pruning: remove expired + remove online players (NO CRASH)
     // =========================================================
 
     private static void pruneExpiredAndOnline(MinecraftServer server, String why) {
         long now = System.currentTimeMillis();
-
         boolean changed = false;
 
-        // 1) remove expired
+        // 1) remove expired (safe without server)
         Iterator<Map.Entry<String, Long>> it = BANNED_UNTIL.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry<String, Long> e = it.next();
@@ -703,13 +666,23 @@ public class HardcoreBanMod implements ModInitializer {
             }
         }
 
-        // 2) remove online players (they cannot be banned if online)
+        // 2) remove online players (server may exist but PlayerManager may not yet!)
         if (server != null && !BANNED_UNTIL.isEmpty()) {
-            for (ServerPlayerEntity sp : server.getPlayerManager().getPlayerList()) {
-                String name = sp.getName().getString();
-                if (BANNED_UNTIL.remove(name) != null) {
-                    log("Prune (" + why + ") online removed name=" + name);
-                    changed = true;
+            PlayerManager pm = null;
+            try {
+                pm = server.getPlayerManager();
+            } catch (Throwable ignored) {}
+
+            if (pm == null) {
+                // This was your crash: PlayerManager not ready during early lifecycle.
+                log("Prune (" + why + ") skipped online-check because PlayerManager is null");
+            } else {
+                for (ServerPlayerEntity sp : pm.getPlayerList()) {
+                    String name = sp.getName().getString();
+                    if (BANNED_UNTIL.remove(name) != null) {
+                        log("Prune (" + why + ") online removed name=" + name);
+                        changed = true;
+                    }
                 }
             }
         }
@@ -731,7 +704,6 @@ public class HardcoreBanMod implements ModInitializer {
         int i = 0;
 
         while (i < str.length()) {
-            // read number
             int start = i;
             while (i < str.length() && Character.isDigit(str.charAt(i))) i++;
             if (start == i) return -1L;
@@ -752,7 +724,7 @@ public class HardcoreBanMod implements ModInitializer {
                 case 'm' -> mul = 60_000L;
                 case 'h' -> mul = 3_600_000L;
                 case 'd' -> mul = 86_400_000L;
-                case 'y' -> mul = 31_536_000_000L; // 365d
+                case 'y' -> mul = 31_536_000_000L;
                 default -> { return -1L; }
             }
 
@@ -793,7 +765,7 @@ public class HardcoreBanMod implements ModInitializer {
 
     private static void loadConfig() {
         if (!Files.exists(CONFIG_PATH)) {
-            saveConfig(); // write defaults
+            saveConfig();
             return;
         }
 
